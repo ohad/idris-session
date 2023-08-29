@@ -5,6 +5,8 @@ import Network.Socket.Data
 import Network.Socket.Raw
 
 import Protocol.Hex
+import Protocol.SExp
+import Protocol.SExp.Parser
 
 import System
 
@@ -38,6 +40,21 @@ socketToFile (MkSocket f _ _ _) = do
 
 
 emptySession : Session version Ready Done
+emptySession = Quit
+
+receiveSExp : Socket -> IO (Either SocketError SExp)
+receiveSExp server = do
+  Right bits <- recvBytes server 6
+  | Left err => ?dealWithMe1
+  let Just count = map (cast {from = Integer, to = Int})
+                 $ fromHexChars $ map cast bits
+  | Nothing => ?dealWithMe2
+  Right sexpSrcBytes <- recvBytes server count
+  | Left err => ?dealWithMe3
+  let sexpSrc = fastPack $ map cast sexpSrcBytes
+  let Right sexp = parseSExp sexpSrc
+  | Left err => ?dealWithMe4
+  pure (Right sexp)
 
 connect : Port -> ({version : IdrisVersion} ->
   Session version Ready Done) -> IO ()
@@ -56,5 +73,14 @@ connect port session = do
                   close server
                   exitWith (ExitFailure 2)
   putStrLn "success!"
+  Right sexp <- receiveSExp server
+  | Left err => ?dealwithme7
+  let Just (ProtocolVersion major minor) = fromSExp {a = Reply} sexp
+  | Just repy => ?dealwithme8
+  | Nothing => ?dealwithme9
+  putStrLn
+    """
+    Protocol version \{show major}.\{show minor}
+    """
   close server
   pure {f = IO} ()
