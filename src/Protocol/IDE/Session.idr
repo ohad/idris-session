@@ -29,6 +29,15 @@ import Protocol.IDE.Session.Error
 
 data ServerState = Ready | Processing IDECommand | Done
 
+record Server (version : IdrisVersion) (state : ServerState) where
+  constructor MkServer
+  socket : Socket
+  msg : Integer
+
+bump : (server : Server version state) ->
+  (Integer, Server version state)
+bump (MkServer socket msg) = (1+msg, MkServer socket (1+msg))
+
 {-  -- Thanks gallais
 
 %default total
@@ -132,14 +141,25 @@ recvUntyped server = do
   | Nothing => pure $ Left $ ParseReply sexp
   pure $ Right reply
 
-handleRepliesWith : Socket -> (c : IDECommand) ->
+matchReply : Integer -> Reply -> Bool
+matchReply ident (ProtocolVersion i j) = True
+matchReply ident (Immediate x i     ) = ident == i
+matchReply ident (Intermediate x i  ) = ident == i
+matchReply ident (WriteString str i ) = ident == i
+matchReply ident (SetPrompt str i   ) = ident == i
+matchReply ident (Warning x str xs i) = ident == i
+
+handleRepliesWith : Socket -> Integer -> (c : IDECommand) ->
   (handler : (r : Reply) ->
              (0 isIntermediate : Intermediate c r) =>
              IO (Either SessionError ())) ->
   IO (Either SessionError (Subset Reply (HasReply c)))
-handleRepliesWith server c handler = do
+handleRepliesWith server ident c handler = do
   Right reply <- recvUntyped server
   | Left err => pure $ Left $ PropagateReply c err
+  let True = matchReply ident reply
+  | False => pure $ Left
+           $ MessageIdentifierMismatch c reply ident
   case validateReplyFor c reply of
     Nothing => do
       putStrLn """
@@ -151,26 +171,26 @@ handleRepliesWith server c handler = do
     Just (Left interm) => do
       Right () <- handler reply
       | Left err => pure $ Left err
-      handleRepliesWith server c handler
+      handleRepliesWith server ident c handler
     Just (Right result) => pure $ Right (Element reply result)
 
 -- TODO: switch to hasIO
-send : Socket ->
+send : Server version Ready ->
   (c : IDECommand) ->
   ((r : Reply) ->
     (0 isIntermediate : Intermediate c r) =>
     IO (Either SessionError ())) ->
   IO (Either SessionError (Subset Reply (HasReply c)))
 send server c handler = do
-  let r = show (SExpList [toSExp c, IntegerAtom 1]) ++ "\n"
+  let (ident, server') = bump server
+  let r = show (SExpList [toSExp c, IntegerAtom ident]) ++ "\n"
       msg = leftPad '0' 6 (asHex (cast (length r)))
             ++ r
-  putStrLn "Sending: \{msg}"
-  Right rc <- send server msg
-  | Left err => ?dealwithme188
-  handleRepliesWith server c handler
+  Right rc <- send server'.socket msg
+  | Left err => pure $ Left
+              $ SendPropagateSocketError c msg err
+  handleRepliesWith server'.socket ident c handler
 
-Server : IdrisVersion -> ServerState -> Type
 -- Internal use only
 data Session : IdrisVersion -> (pre, post : ServerState) -> Type
   where
@@ -205,7 +225,7 @@ connect port session = do
     """
     Protocol version \{show major}.\{show minor}
     """
-  reply <- Session.send server
+  reply <- Session.send (MkServer server 0)
     (LoadFile "src/Protocol/IDE/Session.idr" Nothing)
     --(Interpret ":cwd")
     --(Version)
