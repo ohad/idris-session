@@ -16,7 +16,9 @@ authors = "Ohad Kammar"
 depends = idris-protocols, network
 
 -- modules to install
-modules = Protocol.IDE.Session
+modules
+  = Protocol.IDE.Session
+  , Protocol.IDE.Session.Error
 
 -- main file (i.e. file to load at REPL)
 -- main =

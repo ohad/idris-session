@@ -15,6 +15,8 @@ import Protocol.IDE
 import Data.DPair
 import Data.Either
 
+import Protocol.IDE.Session.Error
+
 {- The server's state machine:
 
   start
@@ -95,39 +97,49 @@ validateReplyFor : (c : IDECommand) -> (r : Reply) ->
     (HasReply c r)
 validateReplyFor c r = Nothing
 
-receiveSExp : Socket -> IO (Either SocketError SExp)
+export
+||| Read an S-expression from the socket
+|||
+||| requires socket is connected to IDE server
+receiveSExp : Socket -> IO (Either SessionSExpError SExp)
 receiveSExp server = do
   Right bits <- recvBytes server 6
-  | Left err => ?dealWithMe1
+  | Left err => pure $ Left $ Socket (PacketCountSocketError, err)
   let Just count = map (cast {from = Integer, to = Int})
                  $ fromHexChars $ map cast bits
-  | Nothing => ?dealWithMe2
+  | Nothing => pure $ Left $ Encoding $ PacketSizeParse
+                    $ fastPack $ map cast bits
   Right sexpSrcBytes <- recvBytes server count
-  | Left err => ?dealWithMe3
+  | Left err => pure $ Left $ Socket
+                     (PacketPayloadSocketError, err)
   let sexpSrc = fastPack $ map cast sexpSrcBytes
   let Right sexp = parseSExp sexpSrc
-  | Left err => ?dealWithMe4
+  | Left err => pure $ Left $ SExpParse err
   pure (Right sexp)
 
--- TODO: errors...
-recvUntyped : Socket -> IO Reply
+export
+||| Read a reply from the socket
+recvUntyped : Socket -> IO (Either SessionReplyError Reply)
 recvUntyped server = do
   Right sexp <- receiveSExp server
-  | Left err => ?dealwithmesometime10
+  | Left err => pure $ Left $
+                PropagateSExp err
+  -- TODO: for logging purproses, delete this once finished
   putStrLn """
     recvUntyped:sexp=\{show sexp}
     """
   let Just reply = fromSExp sexp
-  | Nothing => ?dealwithmesometime9
-  pure reply
+  | Nothing => pure $ Left $ ParseReply sexp
+  pure $ Right reply
 
 handleRepliesWith : Socket -> (c : IDECommand) ->
   (handler : (r : Reply) ->
              (0 isIntermediate : Intermediate c r) =>
-             IO ()) ->
-  IO (Subset Reply (HasReply c))
+             IO (Either SessionError ())) ->
+  IO (Either SessionError (Subset Reply (HasReply c)))
 handleRepliesWith server c handler = do
-  reply <- recvUntyped server
+  Right reply <- recvUntyped server
+  | Left err => pure $ Left $ PropagateReply c err
   case validateReplyFor c reply of
     Nothing => do
       putStrLn """
@@ -135,19 +147,20 @@ handleRepliesWith server c handler = do
           issued: \{show $ toSExp c}
           received: \{show $ toSExp reply}
         """
-      exitWith (ExitFailure 1)
+      pure $ Left $ UnexpectedReply c reply
     Just (Left interm) => do
-      handler reply
+      Right () <- handler reply
+      | Left err => pure $ Left err
       handleRepliesWith server c handler
-    Just (Right result) => pure (Element reply result)
+    Just (Right result) => pure $ Right (Element reply result)
 
 -- TODO: switch to hasIO
 send : Socket ->
   (c : IDECommand) ->
   ((r : Reply) ->
     (0 isIntermediate : Intermediate c r) =>
-    IO ()) ->
-  IO (Subset Reply (HasReply c))
+    IO (Either SessionError ())) ->
+  IO (Either SessionError (Subset Reply (HasReply c)))
 send server c handler = do
   let r = show (SExpList [toSExp c, IntegerAtom 1]) ++ "\n"
       msg = leftPad '0' 6 (asHex (cast (length r)))
@@ -157,25 +170,11 @@ send server c handler = do
   | Left err => ?dealwithme188
   handleRepliesWith server c handler
 
-{-
-send _ _ = do
-  putStrLn "Not yet implemented"
-  exitWith (ExitFailure 1)
--}
 Server : IdrisVersion -> ServerState -> Type
 -- Internal use only
 data Session : IdrisVersion -> (pre, post : ServerState) -> Type
   where
   Quit : Session version Ready Done
-{-
-socketToFile : Socket -> IO (Either String File)
-socketToFile (MkSocket f _ _ _) = do
-  file <- FHandle <$> primIO (prim__idrnet_fdopen f "r+")
-  if !(fileError file)
-    then pure (Left "Failed to fdopen socket file descriptor")
-    else pure (Right file)
--}
-
 
 emptySession : Session version Ready Done
 emptySession = Quit
