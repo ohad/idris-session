@@ -117,7 +117,9 @@ export
 ||| Read an S-expression from the socket
 |||
 ||| requires socket is connected to IDE server
-receiveSExp : Socket -> IO (Either SessionSExpError SExp)
+receiveSExp :
+  (hasIO : HasIO io) =>
+  Socket -> io (Either SessionSExpError SExp)
 receiveSExp server = do
   Right bits <- recvBytes server 6
   | Left err => pure $ Left $ Socket (PacketCountSocketError, err)
@@ -135,7 +137,9 @@ receiveSExp server = do
 
 export
 ||| Read a reply from the socket
-recvUntyped : Socket -> IO (Either SessionReplyError Reply)
+recvUntyped :
+  (hasIO : HasIO io) =>
+  Socket -> io (Either SessionReplyError Reply)
 recvUntyped server = do
   Right sexp <- receiveSExp server
   | Left err => pure $ Left $
@@ -156,11 +160,13 @@ matchReply ident (WriteString str i ) = ident == i
 matchReply ident (SetPrompt str i   ) = ident == i
 matchReply ident (Warning x str xs i) = ident == i
 
-handleRepliesWith : Socket -> Integer -> (c : IDECommand) ->
+handleRepliesWith :
+  (hasIO : HasIO io) =>
+  Socket -> Integer -> (c : IDECommand) ->
   (handler : (r : Reply) ->
              (0 isIntermediate : Intermediate c r) =>
-             IO (Either SessionError ())) ->
-  IO (Either SessionError (Subset Reply (HasReply c)))
+             io (Either SessionError ())) ->
+  io (Either SessionError (Subset Reply (HasReply c)))
 handleRepliesWith server ident c handler = do
   Right reply <- recvUntyped server
   | Left err => pure $ Left $ PropagateReply c err
@@ -181,13 +187,13 @@ handleRepliesWith server ident c handler = do
       handleRepliesWith server ident c handler
     Just (Right result) => pure $ Right (Element reply result)
 
--- TODO: switch to hasIO
-send : Server version Ready ->
+
+send : (hasIO : HasIO io) => Server version Ready ->
   (c : IDECommand) ->
   ((r : Reply) ->
     (0 isIntermediate : Intermediate c r) =>
-    IO (Either SessionError ())) ->
-  IO (Either SessionError (Subset Reply (HasReply c)))
+    io (Either SessionError ())) ->
+  io (Either SessionError (Subset Reply (HasReply c)))
 send server c handler = do
   let (ident, server') = bump server
   let r = show (SExpList [toSExp c, IntegerAtom ident]) ++ "\n"
@@ -204,10 +210,12 @@ export
 ||| Connect to the IDE server
 ||| Consider using `connectWith` and passing a call-back
 ||| to avoid keeping the server open
-connect : Port ->
+connect :
+  (hasIO : HasIO io) =>
+  Port ->
   {default (Hostname "localhost")
     address : SocketAddress}->
-  IO (Either SessionError
+  io (Either SessionError
        (version : IDEProtocolVersion ** Server version Ready))
 connect port = do
   Right server <- socket AF_INET Stream 0
@@ -237,12 +245,15 @@ connect port = do
 
 ||| Connect to the IDE server and execute the given session
 ||| Ensures the server is closed at the end of the session
-connectWith : Port ->
+connectWith :
+  (hasIO : HasIO io) =>
+  Port ->
   {default (Hostname "localhost")
     address : SocketAddress}->
   (session :
     {version : IDEProtocolVersion} -> Server version Ready ->
-  IO (Either SessionError a)) -> IO (Either SessionError a)
+  io (Either SessionError a)) ->
+  io (Either SessionError a)
 connectWith port session = do
   Right (_ ** server) <- Session.connect {address} port
   | Left err => pure $ Left err
