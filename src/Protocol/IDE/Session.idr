@@ -27,9 +27,16 @@ import Protocol.IDE.Session.Error
       RECV :return :ok, :error
 -}
 
+public export
 data ServerState = Ready | Processing IDECommand | Done
 
-record Server (version : IdrisVersion) (state : ServerState) where
+public export
+record IDEProtocolVersion where
+  constructor MkIDEProtocolVersion
+  minor, major : Int
+
+record Server (version : IDEProtocolVersion)
+              (state : ServerState) where
   constructor MkServer
   socket : Socket
   msg : Integer
@@ -187,51 +194,62 @@ send server c handler = do
       msg = leftPad '0' 6 (asHex (cast (length r)))
             ++ r
   Right rc <- send server'.socket msg
-  | Left err => pure $ Left
-              $ SendPropagateSocketError c msg err
+  | Left err => do
+      close server'.socket
+      pure $ Left
+           $ SendPropagateSocketError c msg err
   handleRepliesWith server'.socket ident c handler
 
--- Internal use only
-data Session : IdrisVersion -> (pre, post : ServerState) -> Type
-  where
-  Quit : Session version Ready Done
-
-emptySession : Session version Ready Done
-emptySession = Quit
-
-connect : Port -> ({version : IdrisVersion} ->
-  Session version Ready Done) -> IO ()
-connect port session = do
+export
+||| Connect to the IDE server
+||| Consider using `connectWith` and passing a call-back
+||| to avoid keeping the server open
+connect : Port ->
+  {default (Hostname "localhost")
+    address : SocketAddress}->
+  IO (Either SessionError
+       (version : IDEProtocolVersion ** Server version Ready))
+connect port = do
   Right server <- socket AF_INET Stream 0
-  | Left err => do putStrLn """
-                     Failed to open socket.
-                     \{show err}
-                     """
-                   exitWith (ExitFailure 1)
-  0 <- connect server (Hostname "localhost") port
-  | errCode => do putStrLn """
-                  Failed to bind to Idris server port \{show port}.
-                  Error code \{show errCode}.
-                  """
-                  close server
-                  exitWith (ExitFailure 2)
-  putStrLn "success!"
+  | Left err => pure $ Left $ Connection address port
+                     $ SocketFailure AF_INET Stream 0 err
+  0 <- connect server address port
+  | errCode => do close server
+                  pure $ Left $ Connection address port
+                       $ ConnectionFailure errCode
   Right sexp <- receiveSExp server
-  | Left err => ?dealwithme7
-  let Just (ProtocolVersion major minor) = fromSExp {a = Reply} sexp
-  | Just repy => ?dealwithme8
-  | Nothing => ?dealwithme9
-  putStrLn
-    """
-    Protocol version \{show major}.\{show minor}
-    """
-  reply <- Session.send (MkServer server 0)
-    (LoadFile "src/Protocol/IDE/Session.idr" Nothing)
-    --(Interpret ":cwd")
-    --(Version)
-    (\response => void %search)
-  --?help
-  close server
+  | Left err => do
+              close server
+              pure $ Left $ Connection address port
+                   $ ConnectionPropagateSExp err
+  let Just (ProtocolVersion major minor)
+        = fromSExp {a = Reply} sexp
+  | Just reply => do
+      close server
+      pure $ Left $ Connection address port
+           $ HandshakeUnexpected reply
+  | Nothing => do
+      close server
+      pure $ Left $ Connection address port
+           $ HandshakeParseError sexp
+  pure $ Right (MkIDEProtocolVersion major minor **
+    (MkServer server 0))
+
+||| Connect to the IDE server and execute the given session
+||| Ensures the server is closed at the end of the session
+connectWith : Port ->
+  {default (Hostname "localhost")
+    address : SocketAddress}->
+  (session :
+    {version : IDEProtocolVersion} -> Server version Ready ->
+  IO (Either SessionError a)) -> IO (Either SessionError a)
+connectWith port session = do
+  Right (_ ** server) <- Session.connect {address} port
+  | Left err => pure $ Left err
+  result <- session server
+  close server.socket
+  pure result
+
 
 response : String
 response = #"(:output (:ok (:highlight-source ((((:filename "src/Protocol/IDE/Session.idr") (:start 0 0) (:end 0 6)) ((:decor :keyword)))))) 1)"#
